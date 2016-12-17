@@ -1,5 +1,6 @@
 *.suo
-vkquake.VC*
+.idea
+cmake-build-*
 Misc/vq_pak/vkquake.pak
 Quake/*.dll
 Quake/*.o
@@ -8,7 +9,8 @@ Quake/id1/
 Quake/vkquake
 Quake/vkQuake.exe
 Quake/vkQuake.res
-Windows/VisualStudio/Build-vkQuake/
-Shaders/Compiled/*spv
 Shaders/bintoc.exe
 Shaders/bintoc.obj
+Shaders/Compiled/*spv
+vkquake.VC*
+Windows/VisualStudio/Build-vkQuake/
