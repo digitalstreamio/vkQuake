@@ -43,9 +43,9 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
 #define COLOR_BUFFER_FORMAT VK_FORMAT_R8G8B8A8_UNORM
 
 typedef struct {
-	int			width;
-	int			height;
-	int			bpp;
+  int			width;
+  int			height;
+  int			bpp;
 } vmode_t;
 
 static vmode_t	modelist[MAX_MODE_LIST];
@@ -83,7 +83,7 @@ static cvar_t	vid_width = {"vid_width", "800", CVAR_ARCHIVE};		// QuakeSpasm, wa
 static cvar_t	vid_height = {"vid_height", "600", CVAR_ARCHIVE};	// QuakeSpasm, was 480
 static cvar_t	vid_bpp = {"vid_bpp", "16", CVAR_ARCHIVE};
 static cvar_t	vid_vsync = {"vid_vsync", "0", CVAR_ARCHIVE};
-static cvar_t	vid_desktopfullscreen = {"vid_desktopfullscreen", "0", CVAR_ARCHIVE}; // QuakeSpasm
+static cvar_t	vid_desktopfullscreen = {"vid_desktopfullscreen", "1", CVAR_ARCHIVE}; // QuakeSpasm
 static cvar_t	vid_borderless = {"vid_borderless", "0", CVAR_ARCHIVE}; // QuakeSpasm
 cvar_t	vid_filter = {"vid_filter", "0", CVAR_ARCHIVE};
 cvar_t	vid_anisotropic = {"vid_anisotropic", "0", CVAR_ARCHIVE};
@@ -151,7 +151,7 @@ VkBool32 debug_message_callback(VkDebugReportFlagsEXT flags, VkDebugReportObject
 	{
 		prefix = "WARNING";
 	};
-	
+
 	Sys_Printf("[Validation %s]: %s\n", prefix, pMsg);
 
 	return VK_FALSE;
@@ -180,6 +180,24 @@ static void VID_Gamma_Init (void)
 {
 	Cvar_RegisterVariable (&vid_gamma);
 	Cvar_RegisterVariable (&vid_contrast);
+}
+
+
+/*
+====================
+VID_BitsPerPixel
+
+ Workaround for SDL2 bug with GetDisplayMode returning undefined format
+ under Wayland backend. Default bpp to 32.
+====================
+*/
+static int VID_BitsPerPixel(int format)
+{
+#ifdef VK_USE_PLATFORM_WAYLAND_KHR
+  return 32;
+#else
+  return SDL_BITSPERPIXEL(format);
+#endif
 }
 
 /*
@@ -214,7 +232,7 @@ VID_GetCurrentBPP
 static int VID_GetCurrentBPP (void)
 {
 	const Uint32 pixelFormat = SDL_GetWindowPixelFormat(draw_context);
-	return SDL_BITSPERPIXEL(pixelFormat);
+	return VID_BitsPerPixel(pixelFormat);
 }
 
 /*
@@ -294,19 +312,28 @@ with the requested bpp. If we didn't care about bpp we could just pass NULL.
 static SDL_DisplayMode *VID_SDL2_GetDisplayMode(int width, int height, int bpp)
 {
 	static SDL_DisplayMode mode;
+#ifdef VK_USE_PLATFORM_WAYLAND_KHR
+	mode.w = width;
+	mode.h = height;
+	mode.format = SDL_PIXELFORMAT_RGBA8888;
+	mode.refresh_rate = 0;
+	mode.driverdata = 0;
+	return &mode;
+#else
 	const int sdlmodes = SDL_GetNumDisplayModes(0);
 	int i;
 
 	for (i = 0; i < sdlmodes; i++)
 	{
 		if (SDL_GetDisplayMode(0, i, &mode) == 0
-			&& mode.w == width && mode.h == height
-			&& SDL_BITSPERPIXEL(mode.format) == bpp)
+				&& mode.w == width && mode.h == height
+				&& VID_BitsPerPixel(mode.format) == bpp)
 		{
 			return &mode;
 		}
 	}
 	return NULL;
+#endif
 }
 
 /*
@@ -319,7 +346,7 @@ static qboolean VID_ValidMode (int width, int height, int bpp, qboolean fullscre
 // ignore width / height / bpp if vid_desktopfullscreen is enabled
 	if (fullscreen && vid_desktopfullscreen.value)
 		return true;
-	
+
 	if (width < 320)
 		return false;
 
@@ -352,7 +379,9 @@ static qboolean VID_SetMode (int width, int height, int bpp, qboolean fullscreen
 	int		temp;
 	Uint32	flags;
 	char		caption[50];
-	
+
+	Sys_Printf("Setting video mode to %d %d %d %d\n", width, height, bpp, fullscreen);
+
 	// so Con_Printfs don't mess us up by forcing vid and snd updates
 	temp = scr_disabled_for_loading;
 	scr_disabled_for_loading = true;
@@ -363,46 +392,50 @@ static qboolean VID_SetMode (int width, int height, int bpp, qboolean fullscreen
 	q_snprintf(caption, sizeof(caption), "vkQuake %1.2f.%d", (float)VKQUAKE_VERSION, VKQUAKE_VER_PATCH);
 
 	/* Create the window if needed, hidden */
-	if (!draw_context)
-	{
-		flags = SDL_WINDOW_HIDDEN;
+    if (!draw_context)
+    {
+        flags = SDL_WINDOW_HIDDEN;
 
-		if (vid_borderless.value)
-			flags |= SDL_WINDOW_BORDERLESS;
-		
-		draw_context = SDL_CreateWindow (caption, SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED, width, height, flags);
-		if (!draw_context)
-			Sys_Error ("Couldn't create window");
+        if (vid_borderless.value)
+            flags |= SDL_WINDOW_BORDERLESS;
 
-		SDL_VERSION(&sys_wm_info.version);
-		if(!SDL_GetWindowWMInfo(draw_context,&sys_wm_info))
-			Sys_Error ("Couldn't get window wm info");
-	}
+        draw_context = SDL_CreateWindow (caption, SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED, width, height, flags);
+        if (!draw_context)
+            Sys_Error ("Couldn't create window");
 
-	/* Ensure the window is not fullscreen */
-	if (VID_GetFullscreen ())
-	{
-		if (SDL_SetWindowFullscreen (draw_context, 0) != 0)
-			Sys_Error("Couldn't set fullscreen state mode");
-	}
+        SDL_VERSION(&sys_wm_info.version);
+        if(!SDL_GetWindowWMInfo(draw_context,&sys_wm_info))
+            Sys_Error ("Couldn't get window wm info");
+    }
 
-	/* Set window size and display mode */
-	SDL_SetWindowSize (draw_context, width, height);
-	SDL_SetWindowPosition (draw_context, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED);
+    /* Before modifying window state, hide it, otherwise some ops are not supported
+     * under Wayland */
+    SDL_HideWindow(draw_context);
+
+    /* Ensure the window is not fullscreen */
+    if (VID_GetFullscreen ())
+    {
+        if (SDL_SetWindowFullscreen (draw_context, 0) != 0)
+            Sys_Error("Couldn't set fullscreen state mode");
+    }
+
+    /* Set window size and display mode */
+    SDL_SetWindowSize (draw_context, width, height);
+    SDL_SetWindowPosition (draw_context, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED);
 	SDL_SetWindowDisplayMode (draw_context, VID_SDL2_GetDisplayMode(width, height, bpp));
-	SDL_SetWindowBordered (draw_context, vid_borderless.value ? SDL_FALSE : SDL_TRUE);
+    SDL_SetWindowBordered (draw_context, vid_borderless.value ? SDL_FALSE : SDL_TRUE);
 
-	/* Make window fullscreen if needed, and show the window */
+    /* Make window fullscreen if needed, and show the window */
 
-	if (fullscreen) {
-		Uint32 flags = vid_desktopfullscreen.value ?
-			SDL_WINDOW_FULLSCREEN_DESKTOP :
-			SDL_WINDOW_FULLSCREEN;
-		if (SDL_SetWindowFullscreen (draw_context, flags) != 0)
+    if (fullscreen) {
+        Uint32 flags = vid_desktopfullscreen.value ?
+                       SDL_WINDOW_FULLSCREEN_DESKTOP :
+                       SDL_WINDOW_FULLSCREEN;
+        if (SDL_SetWindowFullscreen (draw_context, flags) != 0)
 			Sys_Error ("Couldn't set fullscreen state mode");
-	}
+    }
 
-	SDL_ShowWindow (draw_context);
+    SDL_ShowWindow (draw_context);
 
 	vid.width = VID_GetCurrentWidth();
 	vid.height = VID_GetCurrentHeight();
@@ -535,7 +568,7 @@ static void GL_InitInstance( void )
 	if (err == VK_SUCCESS || instance_extension_count > 0)
 	{
 		VkExtensionProperties *instance_extensions = (VkExtensionProperties *)
-						malloc(sizeof(VkExtensionProperties) * instance_extension_count);
+				malloc(sizeof(VkExtensionProperties) * instance_extension_count);
 		err = vkEnumerateInstanceExtensionProperties(NULL, &instance_extension_count, instance_extensions);
 
 		for (i = 0; i < instance_extension_count; ++i)
@@ -549,6 +582,8 @@ static void GL_InitInstance( void )
 #define PLATFORM_SURF_EXT VK_KHR_WIN32_SURFACE_EXTENSION_NAME
 #elif VK_USE_PLATFORM_XCB_KHR
 #define PLATFORM_SURF_EXT VK_KHR_XCB_SURFACE_EXTENSION_NAME
+#elif VK_USE_PLATFORM_WAYLAND_KHR
+#define PLATFORM_SURF_EXT VK_KHR_WAYLAND_SURFACE_EXTENSION_NAME
 #endif
 
 			if (strcmp(PLATFORM_SURF_EXT, instance_extensions[i].extensionName) == 0)
@@ -562,7 +597,7 @@ static void GL_InitInstance( void )
 
 	if(found_surface_extensions != 2)
 		Sys_Error("Couldn't find %s/%s extensions", VK_KHR_SURFACE_EXTENSION_NAME, PLATFORM_SURF_EXT);
-	
+
 	VkApplicationInfo application_info;
 	memset(&application_info, 0, sizeof(application_info));
 	application_info.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
@@ -613,6 +648,16 @@ static void GL_InitInstance( void )
 	surface_create_info.window = sys_wm_info.info.x11.window;
 
 	err = vkCreateXcbSurfaceKHR(vulkan_instance, &surface_create_info, NULL, &vulkan_surface);
+	if (err != VK_SUCCESS)
+		Sys_Error("Couldn't create Vulkan surface");
+#elif VK_USE_PLATFORM_WAYLAND_KHR
+		VkWaylandSurfaceCreateInfoKHR surface_create_info;
+	memset(&surface_create_info, 0, sizeof(surface_create_info));
+	surface_create_info.sType = VK_STRUCTURE_TYPE_WAYLAND_SURFACE_CREATE_INFO_KHR;
+	surface_create_info.display = sys_wm_info.info.wl.display;
+	surface_create_info.surface =sys_wm_info.info.wl.surface;
+
+	err = vkCreateWaylandSurfaceKHR(vulkan_instance, &surface_create_info, NULL, &vulkan_surface);
 	if (err != VK_SUCCESS)
 		Sys_Error("Couldn't create Vulkan surface");
 #endif
@@ -844,7 +889,7 @@ static void GL_InitCommandBuffers( void )
 	memset(&fence_create_info, 0, sizeof(fence_create_info));
 	fence_create_info.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
 
-	for (i = 0; i < NUM_COMMAND_BUFFERS; ++i) 
+	for (i = 0; i < NUM_COMMAND_BUFFERS; ++i)
 	{
 		err = vkCreateFence(vulkan_globals.device, &fence_create_info, NULL, &command_buffer_fences[i]);
 		if (err != VK_SUCCESS)
@@ -1030,7 +1075,7 @@ static void GL_CreateDepthBuffer( void )
 	Con_Printf("Creating depth buffer\n");
 
 	VkResult err;
-	
+
 	VkImageCreateInfo image_create_info;
 	memset(&image_create_info, 0, sizeof(image_create_info));
 	image_create_info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
@@ -1125,7 +1170,7 @@ static void GL_CreateColorBuffer( void )
 		err = vkCreateImage(vulkan_globals.device, &image_create_info, NULL, &vulkan_globals.color_buffers[i]);
 		if (err != VK_SUCCESS)
 			Sys_Error("vkCreateImage failed");
-	
+
 		GL_SetObjectName((uint64_t)vulkan_globals.color_buffers[i], VK_DEBUG_REPORT_OBJECT_TYPE_IMAGE_EXT, va("Color Buffer %d", i));
 
 		VkMemoryRequirements memory_requirements;
@@ -1185,20 +1230,20 @@ static void GL_CreateColorBuffer( void )
 
 		switch(vulkan_globals.sample_count)
 		{
-			case VK_SAMPLE_COUNT_2_BIT:
-				Con_Printf("2 MSAA Samples\n");
-				break;
-			case VK_SAMPLE_COUNT_4_BIT:
-				Con_Printf("4 MSAA Samples\n");
-				break;
-			case VK_SAMPLE_COUNT_8_BIT:
-				Con_Printf("8 MSAA Samples\n");
-				break;
-			case VK_SAMPLE_COUNT_16_BIT:
-				Con_Printf("16 MSAA Samples\n");
-				break;
-			default:
-				break;
+		case VK_SAMPLE_COUNT_2_BIT:
+			Con_Printf("2 MSAA Samples\n");
+			break;
+		case VK_SAMPLE_COUNT_4_BIT:
+			Con_Printf("4 MSAA Samples\n");
+			break;
+		case VK_SAMPLE_COUNT_8_BIT:
+			Con_Printf("8 MSAA Samples\n");
+			break;
+		case VK_SAMPLE_COUNT_16_BIT:
+			Con_Printf("16 MSAA Samples\n");
+			break;
+		default:
+			break;
 		}
 	}
 
@@ -1211,7 +1256,7 @@ static void GL_CreateColorBuffer( void )
 			Sys_Error("vkCreateImage failed");
 
 		GL_SetObjectName((uint64_t)msaa_color_buffer, VK_DEBUG_REPORT_OBJECT_TYPE_IMAGE_EXT, "MSAA Color Buffer");
-	
+
 		VkMemoryRequirements memory_requirements;
 		vkGetImageMemoryRequirements(vulkan_globals.device, msaa_color_buffer, &memory_requirements);
 
@@ -1337,8 +1382,10 @@ static void GL_CreateSwapChain( void )
 	err = fpGetPhysicalDeviceSurfaceCapabilitiesKHR(vulkan_physical_device, vulkan_surface, &vulkan_surface_capabilities);
 	if (err != VK_SUCCESS)
 		Sys_Error("Couldn't get surface capabilities");
-	if (vulkan_surface_capabilities.currentExtent.width != vid.width || vulkan_surface_capabilities.currentExtent.height != vid.height)
-		Sys_Error("Surface doesn't match video width or height");
+	if (vulkan_surface_capabilities.currentExtent.width != -1 && vulkan_surface_capabilities.currentExtent.height != -1) {
+		if (vulkan_surface_capabilities.currentExtent.width != vid.width || vulkan_surface_capabilities.currentExtent.height != vid.height)
+			Sys_Error("Surface doesn't match video width or height");
+	}
 
 	uint32_t format_count;
 	err = fpGetPhysicalDeviceSurfaceFormatsKHR(vulkan_physical_device, vulkan_surface, &format_count, NULL);
@@ -1690,7 +1737,7 @@ void GL_EndRendering (void)
 {
 	R_SubmitStagingBuffers();
 	R_FlushDynamicBuffers();
-	
+
 	VkResult err;
 
 	// Render post process
@@ -1734,7 +1781,7 @@ void GL_EndRendering (void)
 	present_info.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
 	present_info.swapchainCount = 1;
 	present_info.pSwapchains = &vulkan_swapchain,
-	present_info.pImageIndices = &current_swapchain_buffer;
+			present_info.pImageIndices = &current_swapchain_buffer;
 	err = fpQueuePresentKHR(vulkan_globals.queue, &present_info);
 	if (err != VK_SUCCESS)
 		Sys_Error("vkQueuePresentKHR failed");
@@ -1806,10 +1853,10 @@ static void VID_DescribeCurrentMode_f (void)
 {
 	if (draw_context)
 		Con_Printf("%dx%dx%d %s\n",
-			VID_GetCurrentWidth(),
-			VID_GetCurrentHeight(),
-			VID_GetCurrentBPP(),
-			VID_GetFullscreen() ? "fullscreen" : "windowed");
+				   VID_GetCurrentWidth(),
+				   VID_GetCurrentHeight(),
+				   VID_GetCurrentBPP(),
+				   VID_GetFullscreen() ? "fullscreen" : "windowed");
 }
 
 /*
@@ -1851,12 +1898,32 @@ static void VID_DescribeModes_f (void)
 VID_InitModelist
 =================
 */
+static vmode_t default_modes[] = {
+    { .width = 640, .height = 480, .bpp = 32 },
+    { .width = 800, .height = 600, .bpp = 32 },
+    { .width = 1024, .height = 768, .bpp = 32 }
+};
+static int default_modes_count = sizeof(default_modes) / sizeof(vmode_t);
+
+
 static void VID_InitModelist (void)
 {
 	const int sdlmodes = SDL_GetNumDisplayModes(0);
 	int i;
 
 	nummodes = 0;
+
+#ifdef VK_USE_PLATFORM_WAYLAND_KHR
+    /* Workaround for SDL2 bug w/ SDL_GetNumDisplayModes not able to enumerate
+     * resolutions other than native under Wayland */
+	if (sdlmodes == 1) {
+      for (i = 0; i < default_modes_count; i++) {
+        modelist[nummodes] = default_modes[i];
+        nummodes++;
+      }
+	}
+#endif
+
 	for (i = 0; i < sdlmodes; i++)
 	{
 		SDL_DisplayMode mode;
@@ -1867,7 +1934,7 @@ static void VID_InitModelist (void)
 		{
 			modelist[nummodes].width = mode.w;
 			modelist[nummodes].height = mode.h;
-			modelist[nummodes].bpp = SDL_BITSPERPIXEL(mode.format);
+			modelist[nummodes].bpp = VID_BitsPerPixel(mode.format);
 			nummodes++;
 		}
 	}
@@ -1884,13 +1951,13 @@ void	VID_Init (void)
 	int		p, width, height, bpp, display_width, display_height, display_bpp;
 	qboolean	fullscreen;
 	const char	*read_vars[] = { "vid_fullscreen",
-					 "vid_width",
-					 "vid_height",
-					 "vid_bpp",
-					 "vid_vsync",
-					 "vid_desktopfullscreen",
-					 "vid_fsaa",
-					 "vid_borderless"};
+								   "vid_width",
+								   "vid_height",
+								   "vid_bpp",
+								   "vid_vsync",
+								   "vid_desktopfullscreen",
+								   "vid_fsaa",
+								   "vid_borderless"};
 #define num_readvars	( sizeof(read_vars)/sizeof(read_vars[0]) )
 
 	Cvar_RegisterVariable (&vid_fullscreen); //johnfitz
@@ -1913,7 +1980,7 @@ void	VID_Init (void)
 	Cvar_SetCallback (&vid_vsync, VID_Changed_f);
 	Cvar_SetCallback (&vid_desktopfullscreen, VID_Changed_f);
 	Cvar_SetCallback (&vid_borderless, VID_Changed_f);
-	
+
 	Cmd_AddCommand ("vid_unlock", VID_Unlock); //johnfitz
 	Cmd_AddCommand ("vid_restart", VID_Restart); //johnfitz
 	Cmd_AddCommand ("vid_test", VID_Test); //johnfitz
@@ -1932,7 +1999,7 @@ void	VID_Init (void)
 
 		display_width = mode.w;
 		display_height = mode.h;
-		display_bpp = SDL_BITSPERPIXEL(mode.format);
+		display_bpp = VID_BitsPerPixel(mode.format);
 	}
 
 	Cvar_SetValueQuick (&vid_bpp, (float)display_bpp);
@@ -2070,12 +2137,12 @@ static void VID_Restart (void)
 	if (!VID_ValidMode (width, height, bpp, fullscreen))
 	{
 		Con_Printf ("%dx%dx%d %s is not a valid mode\n",
-				width, height, bpp, fullscreen? "fullscreen" : "windowed");
+					width, height, bpp, fullscreen? "fullscreen" : "windowed");
 		return;
 	}
 
 	scr_initialized = false;
-	
+
 	GL_WaitForDeviceIdle();
 	R_DestroyPipelines();
 	GL_DestroyBeforeSetMode();
@@ -2174,7 +2241,7 @@ void	VID_Toggle (void)
 	{
 		vid_toggle_works = false;
 		Con_DPrintf ("SDL_WM_ToggleFullScreen failed, attempting VID_Restart\n");
-	vrestart:
+	  vrestart:
 		Cvar_SetQuick (&vid_fullscreen, VID_GetFullscreen() ? "0" : "1");
 		Cbuf_AddText ("vid_restart\n");
 	}
@@ -2208,23 +2275,23 @@ void VID_SyncCvars (void)
 //==========================================================================
 
 enum {
-	VID_OPT_MODE,
-	VID_OPT_BPP,
-	VID_OPT_FULLSCREEN,
-	VID_OPT_VSYNC,
-	VID_OPT_ANTIALIASING,
-	VID_OPT_FILTER,
-	VID_OPT_ANISOTROPY,
-	VID_OPT_UNDERWATER,
-	VID_OPT_TEST,
-	VID_OPT_APPLY,
-	VIDEO_OPTIONS_ITEMS
+  VID_OPT_MODE,
+  VID_OPT_BPP,
+  VID_OPT_FULLSCREEN,
+  VID_OPT_VSYNC,
+  VID_OPT_ANTIALIASING,
+  VID_OPT_FILTER,
+  VID_OPT_ANISOTROPY,
+  VID_OPT_UNDERWATER,
+  VID_OPT_TEST,
+  VID_OPT_APPLY,
+  VIDEO_OPTIONS_ITEMS
 };
 
 static int	video_options_cursor = 0;
 
 typedef struct {
-	int width,height;
+  int width,height;
 } vid_menu_mode;
 
 //TODO: replace these fixed-length arrays with hunk_allocated buffers
@@ -2251,7 +2318,7 @@ static void VID_Menu_Init (void)
 		for (j = 0; j < vid_menu_nummodes; j++)
 		{
 			if (vid_menu_modes[j].width == w &&
-				vid_menu_modes[j].height == h)
+					vid_menu_modes[j].height == h)
 				break;
 		}
 
@@ -2284,7 +2351,7 @@ static void VID_Menu_RebuildBppList (void)
 
 		//bpp list is limited to bpps available with current width/height
 		if (modelist[i].width != vid_width.value ||
-			modelist[i].height != vid_height.value)
+				modelist[i].height != vid_height.value)
 			continue;
 
 		b = modelist[i].bpp;
@@ -2335,7 +2402,7 @@ static void VID_Menu_ChooseNextMode (int dir)
 		for (i = 0; i < vid_menu_nummodes; i++)
 		{
 			if (vid_menu_modes[i].width == vid_width.value &&
-				vid_menu_modes[i].height == vid_height.value)
+					vid_menu_modes[i].height == vid_height.value)
 				break;
 		}
 
@@ -2667,12 +2734,12 @@ void SCR_ScreenShot_f (void)
 	int	i;
 
 	qboolean bgra = (vulkan_globals.swap_chain_format == VK_FORMAT_B8G8R8A8_UNORM)
-		|| (vulkan_globals.swap_chain_format == VK_FORMAT_B8G8R8A8_SRGB);
+			|| (vulkan_globals.swap_chain_format == VK_FORMAT_B8G8R8A8_SRGB);
 
 	if ((vulkan_globals.swap_chain_format != VK_FORMAT_B8G8R8A8_UNORM)
-		&& (vulkan_globals.swap_chain_format != VK_FORMAT_B8G8R8A8_SRGB)
-		&& (vulkan_globals.swap_chain_format != VK_FORMAT_R8G8B8A8_UNORM)
-		&& (vulkan_globals.swap_chain_format != VK_FORMAT_R8G8B8A8_SRGB))
+			&& (vulkan_globals.swap_chain_format != VK_FORMAT_B8G8R8A8_SRGB)
+			&& (vulkan_globals.swap_chain_format != VK_FORMAT_R8G8B8A8_UNORM)
+			&& (vulkan_globals.swap_chain_format != VK_FORMAT_R8G8B8A8_SRGB))
 	{
 		Con_Printf ("SCR_ScreenShot_f: Unsupported surface format\n");
 		return;
